@@ -1,0 +1,19 @@
+# Normalise line endings on checkout. The training and evaluation entry points
+# run on Linux clusters, where a CRLF shell script or job file is rejected
+# outright, so LF is enforced rather than left to the client's core.autocrlf.
+* text=auto eol=lf
+*.py   text eol=lf
+*.sh   text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+
+# Binary assets, if any are ever added, must not be touched.
+*.npy  binary
+*.npz  binary
+*.pt   binary
+*.ckpt binary
+*.tar  binary
+*.png  binary
+*.jpg  binary
+*.mp4  binary

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Data, weights and third-party assets are never committed. This repository
+# ships code only; see README.md for where each of these comes from.
+datasets/
+deps/
+checkpoints/
+experiments/
+results/
+*.pt
+*.ckpt
+*.tar
+*.npy
+*.npz
+*.safetensors
+*.bin
+
+# Logs and run artefacts
+logs/
+lightning_logs/
+wandb/
+runs/
+*.log
+events.out.tfevents.*
+slurm-*.out
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

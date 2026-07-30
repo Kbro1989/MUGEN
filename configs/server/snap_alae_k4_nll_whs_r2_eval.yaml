@@ -1,0 +1,263 @@
+# Evaluation / test counterpart of the MUGEN SnapMoGen flagship recipe.
+#
+# Identical model and data settings to
+# configs/server/snap_alae_k4_nll_whs_r2.yaml; only the TEST block differs.
+# Metrics use the same honest sampled protocol as the HumanML3D evaluation.
+#
+# Point TEST.CHECKPOINTS at the stage-2 checkpoint you want to score.
+K: 4
+NAME: ALAE_GNU_GPT2_SNAP_K${K}_NLLFAC_WHS_R2_EVAL
+ACCELERATOR: 'gpu'
+DEVICE: [0]
+NUM_NODES: 1
+
+# Pre-trained snap-ALAE checkpoint (self-contained format from alae_train.py,
+# latent standardization stats embedded -> variational head reads them).
+ALAE_CKPT: checkpoints/snap-alae-k${K}.pt
+
+TEST:
+  # best_gnu.ckpt = joint G+U selection (BestGNUCheckpoint). Switch to
+  # best_fid.ckpt for the generation-only model.
+  CHECKPOINTS: checkpoints/mugen_snapmogen_k4.ckpt
+  SPLIT: test
+  BATCH_SIZE: 128
+  REPLICATION_TIMES: 1
+  VISUALIZE: false        # master switch (SnapMoGen 24-joint skeleton, 30 fps)
+  VIS_FULL: false        # false -> render a random subset only
+  VIS_NUM_SAMPLES: 20    # subset size when VIS_FULL is false
+  VIS_SEED: 1234         # sampling seed (defaults to SEED_VALUE)
+  VIS_NUM_WORKERS: 32    # render workers (defaults to min(16, cpu//2))
+  # M2T (motion->text) result dump -> m2t_results.csv (file_name, gt_text, pred_text)
+  M2T_SAVE_MODE: off   # sample (random subset) | full | off
+  M2T_SAMPLE_NUM: 100     # number of rows saved when M2T_SAVE_MODE=sample
+  M2T_SAMPLE_SEED: 1234   # sampling seed (defaults to SEED_VALUE)
+
+TRAIN:
+  # RESUME: ${FOLDER}${NAME}/
+  STAGE: lm_pretrain
+  BATCH_SIZE: 128
+  END_EPOCH: 500
+  # Linear LR warmup (SequentialLR wrap in BaseModel.configure_optimizers).
+  WARMUP_EPOCHS: 5
+  precision: 32
+  accumulate_grad_batches: 2
+  check_val_every_n_epoch: 10
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: 495  # END_EPOCH - WARMUP_EPOCHS (cosine runs after the warmup)
+      eta_min: 1e-6
+  OPTIM:
+    target: AdamW
+    # Discriminative fine-tuning switch (selective weight decay included).
+    # HML GNU validation: with the M2T flooding floor owning caption
+    # protection, the backbone runs at the full head rate for the T2M latent
+    # grind -- so keep backbone_lr = params.lr here.
+    backbone_lr: 1e-4
+    params:
+      lr: 1e-4
+      weight_decay: 0.01
+
+EVAL:
+  SPLIT: 'val'
+  BATCH_SIZE: 128
+  NUM_WORKERS: 8
+
+DATASET:
+  target: motGPT.data.SnapMoGen.SnapMoGenDataModule
+  CODE_PATH: ""
+  TASK_PATH: ""
+  NFEATS: 296
+  SNAPMOGEN:
+    ROOT: datasets/snapmogen/
+    FPS: 30
+    MIN_MOTION_LEN: 128   # official min_motion_length
+    MAX_MOTION_LEN: 320   # official max_motion_length
+    UNIT_LEN: 8           # official unit_length
+
+model:
+  target: motGPT.models.alae_motion_gpt_weighted_hs_r2.ALAEMotionGPTWeightedHSR2
+  diff_loss: null
+  params:
+    # ---- Layer router (weighted hidden states; 2026-07-09 rework) ----
+    # ONE-CHANGE A/B vs snap_alae_k4_nll.yaml (snap K4 NLLFAC baseline, test
+    # FID 19.55 / R@1 0.8208): model.target + this block are the only deltas.
+    # Values = the June weighted-hs run's validated block. Latent queries are
+    # imported from the Stage-1 ALAE ckpt and FROZEN (lambda_ortho then inert).
+    num_cross_attn_layers: 2
+    router_hidden: 512
+    gumbel_tau_start: 5.0
+    gumbel_tau_end: 1.5
+    gumbel_anneal_epochs: 100
+    lambda_ortho: 1.0
+    freeze_latent_queries: true
+    # ---- R2 residual-routing block (2026-07-09; see model docstring) ----
+    router_static_scale: 4.0
+    router_delta_scale: 4.0
+    lambda_route_mi: 0.05
+    condition: 'text'
+    # 'gnu' enables the joint T2M + M2T phase inside ALAEMotionGPT.
+    task: 'gnu'
+    stage: ${TRAIN.STAGE}
+    metrics_dict: ['TM2TMetrics']
+    motion_vae: null
+    codebook_size: 0
+    # K latent tokens (must match the snap-ALAE checkpoint).
+    k_motion_tokens: ${K}
+    use_kv_cache: true
+    unfreeze_alae_decoder: false
+    freeze_text_embeddings: true
+    # Loss weights.
+    lambda_rec: 1.0
+    lambda_ric: 0.5
+    lambda_percept: 10.0
+    lambda_latent_l2: 0
+    # Weight of the latent anchor (now the Gaussian NLL). At calibration
+    # (sigma^2 ~ residual^2 ~ 0.48) the NLL mu-gradient (mu-t)/sigma^2 matches
+    # the old per-dim MSE gradient scale, so the HML/GNU-validated value 2
+    # transfers unchanged.
+    lambda_latent_mse: 2
+    # nll = fixed-slot Gaussian NLL (K=4: per-slot stats are distinct, the
+    # cleanest sigma semantics). chamfer_nll = mu-matched set variant for the
+    # K-scaling regime (K>=8) where slot assignment gets arbitrary.
+    # NB: ar_latent_sampling REQUIRES 'nll' (the chain fixes slot order).
+    latent_loss_mode: nll           # ... | nll | chamfer_nll
+    # Chain-rule factorization over the K slots: teacher-forced GT-latent
+    # context at train (one forward), sampled-z feedback at eval. This is the
+    # lever that carries the measured cross-slot correlation (|rho| ~0.4-0.5)
+    # into the sampled joint -- and the prerequisite for K-scaling to pay off.
+    ar_latent_sampling: false
+    # Scheduled sampling on the chain context (two-pass; see model doc).
+    # Pure GT teacher forcing leaks the answer through the rho~0.5
+    # cross-slot correlation (train rec 0.138 = 3x too easy) and the
+    # free-running eval chain collapsed (R@1 0.30 / FID ~55). Inert at K=1.
+    ar_context_sampling: false
+    # ---- Low-rank factor head (2026-07-03 late; replaces the AR chain) ----
+    # Single-shot structured covariance over the flattened K*D latent:
+    # q(z|text) = N(mu, U diag(a(text))^2 U^T + diag(sigma^2)). The global
+    # basis U carries within-slot AND cross-slot correlation in ONE draw --
+    # no sequential feedback, no exposure bias (the continuous AR chain
+    # collapsed without scheduled sampling and val-drifted with it, peak
+    # 29.2 < the K1 diagonal's 25.8). rank 64 = measured residual effective
+    # dim (63/2048). Watch train/factor_a_mean: must GROW from the e^-2
+    # start (~0.14) -- stuck means the factors never engaged.
+    latent_low_rank: 64
+    lambda_latent_set: 1.0
+    latent_sinkhorn_epsilon: 0.05
+    latent_sinkhorn_iters: 30
+    # ---- GNU motion-understanding (M2T) branch ----
+    lambda_m2t: 1.0           # weight of the motion->text CE in the joint loss
+    # SnapMoGen captions are LONG (GPT-2 BPE: p50=54, p95=93, p99=122 vs
+    # HumanML3D's ~64 cap). 128 keeps EOS supervision for ~99% of captions
+    # (the train target is truncated at this same cap) and bounds eval decode.
+    m2t_max_new_tokens: 128
+    # Label smoothing on the M2T CE (captioning default; fights caption
+    # over-confidence / exposure bias).
+    m2t_label_smoothing: 0.1
+    # Train-only Gaussian noise on the M2T input latents, scaled per dim by
+    # the latent_std buffer (anti-memorization; HML-GNU validated at 0.05).
+    m2t_latent_noise_std: 0.05
+    # Flooding level on the M2T CE (|CE - b| + b); see snap_alae_k4.yaml notes.
+    m2t_loss_floor: 2.8
+    m2t_num_beams: 1
+    # ---- Variational latent head: NLL-calibrated conditional sampler ----
+    # Standardization stats come from the snap-ALAE ckpt (embedded by
+    # alae_train.py); no latent_stats_path fallback needed.
+    variational: true
+    # 0: the variance-only KL is the sigma=1 clamp that killed every sampling
+    # attempt -- with the NLL anchor, sigma calibration needs NO prior term.
+    lambda_kl: 0
+    kl_warmup_epochs: 0
+    kl_free_bits: 0.0
+    eval_sample_temperature: 1.0  # MM pass; 1.0 = the calibrated conditional
+    disable_perceptual: false
+    # SnapMoGen perceptual encoder = official evaluator motion tower (selected
+    # automatically because the datamodule is snapmogen).
+    snapmogen_evaluator_dir: deps/snapmogen/evaluator/eval_klde-5_late-5_nlayer6_norm
+    alae_ckpt: ${ALAE_CKPT}
+    # ALAE architecture (MUST exactly match the checkpoint that is loaded).
+    alae:
+      input_dim: 296
+      # K is taken from `k_motion_tokens` above; do not set `k` here.
+      latent_dim: 512
+      hidden_dim: 512
+      depth: 3
+      dilation_growth_rate: 3
+      activation: gelu
+      norm: null
+      num_res_blocks: 2
+      num_encoder_layers: 4
+      num_decoder_layers: 4
+      nhead: 8
+      dim_feedforward: 2048
+      dropout: 0.05
+      max_decode_len: 320
+    lm:
+      target: motGPT.archs.mgpt_lm.MLM
+      params:
+        model_type: gpt2
+        model_path: deps/gpt2
+        stage: ${TRAIN.STAGE}
+        ablation: ${ABLATION}
+        motion_codebook_size: 0
+        # M2T train sequence = prompt (~12) + K motion tokens + caption (<=128)
+        # + EOS; 256 still fits with margin at K=4..64.
+        max_length: 256
+
+LOSS:
+  LAMBDA_CLS: 0.0
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 1.0
+  LAMBDA_KL: 0.0
+  LAMBDA_COMMIT: 0.0
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+METRIC:
+  TASK: 'gnu'
+  TYPE: ['TM2TMetrics']
+  # Official SnapMoGen protocol knobs.
+  SNAPMOGEN_R_SIZE: 100
+  SNAPMOGEN_EVALUATOR_DIR: deps/snapmogen/evaluator/eval_klde-5_late-5_nlayer6_norm
+  # ---- BestGNUCheckpoint (joint G+U model selection -> best_gnu.ckpt) ----
+  GNU_ALPHA: 0.5      # 0.5 balanced; >0.5 favors generation, <0.5 favors understanding
+  # v2 G-side score (2026-07-03): FID_score = 100*tau/(tau+FID) -- tau is now
+  # the FID at which the score is 50 (snap: FID 10->50, 15->40, 27->27,
+  # Stage-1 ceiling 1.28->89; no exp saturation), and Avg_G is a weighted
+  # GEOMETRIC mean so R-precision and FID must peak SIMULTANEOUSLY (no
+  # cross-term compensation). Weights over (R, FID, Match, Div); Match/Div
+  # act as guards (Div catches sampler variance collapse).
+  GNU_FID_TAU: 10.0
+  GNU_G_WEIGHTS: [2.0, 2.0, 1.0, 1.0]
+  DIV_GT: 19.79
+  M2T_BERT_ON_VAL: false
+  # ---- THE PROTOCOL SWITCH: sample the FID/R pass from the calibrated
+  # conditional (z = mu + sigma*eps). Every reported number (val + test) is
+  # generative; best_fid.ckpt is selected under the same protocol. 0 would
+  # fall back to the old mu-decode (regression) protocol.
+  FID_SAMPLE_TEMP: 1.0
+  MM_NUM_SAMPLES: 4
+  MM_NUM_REPEATS: 11
+  # Per-epoch MultiModality monitor during training validation (variational
+  # sampler). Folded into the TM2TMetrics output. With a calibrated sigma this
+  # becomes a REAL MModality number (MoMask++ reports 6.5-7.3).
+  MM_ON_VAL: true
+  MM_VAL_NUM_SAMPLES: 32
+  MM_VAL_NUM_REPEATS: 30
+
+LOGGER:
+  TYPE: ["tensorboard"]
+  VAL_EVERY_STEPS: 10
+  TENSORBOARD:
+    params:
+      save_dir: ${FOLDER_EXP}
+
+ABLATION:
+  predict_ratio: 0.2
+  inbetween_ratio: 0.25
+  use_length: False
+  PREDICT_EPSILON: True
+
+SEED_VALUE: 1234
+DEBUG: false
+FOLDER: experiments/mugen_snapmogen/

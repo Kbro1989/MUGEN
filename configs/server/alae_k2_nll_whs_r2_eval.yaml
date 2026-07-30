@@ -1,0 +1,230 @@
+# Evaluation / test counterpart of the MUGEN HumanML3D flagship recipe.
+#
+# Identical model and data settings to configs/server/alae_k2_nll_whs_r2_dec.yaml;
+# only the TEST block differs. Metrics are computed under the honest sampled
+# protocol: the calibrated head draws one sample per prompt (no mu-decode, no
+# oracle length), which is the protocol every number in the paper uses.
+#
+# Point TEST.CHECKPOINTS at the stage-2 checkpoint you want to score.
+K: 2
+NAME: ALAE_GNU_GPT2_HML_K${K}_NLLFAC_WHS_R2_EVAL
+ACCELERATOR: 'gpu'
+DEVICE: [0]
+NUM_NODES: 1
+
+# Pre-trained HML ALAE checkpoint (state_dict of AdaptiveLengthAutoEncoder).
+ALAE_CKPT: checkpoints/alae_k${K}.pt
+
+TEST:
+  # Generation-only model selection under the sampled protocol.
+  CHECKPOINTS: checkpoints/mugen_humanml3d_k2.ckpt
+  SPLIT: test
+  FOLDER: results
+  BATCH_SIZE: 128
+  REPLICATION_TIMES: 1
+  VISUALIZE: false
+  VIS_FULL: false        # false -> render a random subset only
+  VIS_NUM_SAMPLES: 20    # subset size when VIS_FULL is false
+  VIS_SEED: 1234         # sampling seed (defaults to SEED_VALUE)
+  VIS_NUM_WORKERS: 32    # render workers (defaults to min(16, cpu//2))
+  # M2T (motion->text) result dump -> m2t_results.csv (file_name, gt_text, pred_text)
+  M2T_SAVE_MODE: off
+  M2T_SAMPLE_NUM: 100     # number of rows saved when M2T_SAVE_MODE=sample
+  M2T_SAMPLE_SEED: 1234   # sampling seed (defaults to SEED_VALUE)
+
+TRAIN:
+  # Uncommented by the sbatch runner ONLY when last.ckpt exists (fresh start
+  # otherwise fails resume_config's existence check).
+  # RESUME: ${FOLDER}${NAME}/
+  STAGE: lm_pretrain
+  # Legacy HML token-dataset knob: selects the instruction-template family
+  # (template_t2m_*.json) inside Text2MotionDatasetCBV3. NOT the task switch --
+  # GNU is enabled by model.params.task. Default.yaml would give 'all'
+  # (template_pretrain.json), so keep this pinned to 't2m'.
+  instruction_type: t2m
+  BATCH_SIZE: 256
+  END_EPOCH: 500
+  # Linear LR warmup (SequentialLR wrap in BaseModel.configure_optimizers).
+  WARMUP_EPOCHS: 5
+  # options, 32, bf16, bf16-mixed
+  precision: 32
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 10
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: 495  # END_EPOCH - WARMUP_EPOCHS (cosine runs after the warmup)
+      eta_min: 1e-6
+  OPTIM:
+    target: AdamW
+    # HML GNU validated: with the M2T flooding floor owning caption protection,
+    # the backbone runs at the full head rate for the T2M latent grind.
+    backbone_lr: 1e-4
+    params:
+      lr: 1e-4
+      weight_decay: 0.01
+
+EVAL:
+  SPLIT: 'val'
+  BATCH_SIZE: 128
+  NUM_WORKERS: 8
+
+DATASET:
+  target: motGPT.data.HumanML3D.HumanML3DDataModule
+  CODE_PATH: ""
+  TASK_PATH: ""
+  HUMANML3D:
+    ROOT: datasets/humanml3d/
+    SPLIT_ROOT: datasets/humanml3d/
+    FPS: 20
+    MIN_MOTION_LEN: 20
+    MAX_MOTION_LEN: 200
+
+model:
+  target: motGPT.models.alae_motion_gpt_weighted_hs_r2.ALAEMotionGPTWeightedHSR2
+  diff_loss: null
+  params:
+    # ---- Layer router (weighted hidden states; 2026-07-09 rework) ----
+    # Values = the June weighted-hs run's validated block. Latent queries are
+    # imported from the Stage-1 ALAE ckpt and FROZEN (lambda_ortho then inert).
+    num_cross_attn_layers: 2
+    router_hidden: 512
+    gumbel_tau_start: 5.0
+    gumbel_tau_end: 1.5
+    gumbel_anneal_epochs: 100
+    lambda_ortho: 1.0
+    freeze_latent_queries: true
+    # ---- R2 residual-routing block (2026-07-09; see model docstring) ----
+    router_static_scale: 4.0
+    router_delta_scale: 4.0
+    lambda_route_mi: 0.05
+    condition: 'text'
+    # 'gnu' enables the joint T2M + M2T phase inside ALAEMotionGPT.
+    task: 'gnu'
+    stage: ${TRAIN.STAGE}
+    metrics_dict: ['TM2TMetrics', 'M2TMetrics']
+    motion_vae: null
+    codebook_size: 0
+    # K latent tokens (must match ALAE checkpoint).
+    k_motion_tokens: ${K}
+    use_kv_cache: true
+    unfreeze_alae_decoder: false
+    freeze_text_embeddings: true
+    # Loss weights.
+    lambda_rec: 1.0
+    lambda_ric: 0.5
+    lambda_percept: 10.0
+    lambda_latent_l2: 0
+    # Weight of the latent anchor (now the Gaussian NLL). At calibration
+    # (sigma^2 ~ residual^2) the NLL mu-gradient matches the old per-dim MSE
+    # gradient scale, so the HML/GNU-validated value 2 transfers unchanged.
+    lambda_latent_mse: 2
+    # nll = fixed-slot Gaussian NLL (K=4: per-slot stats are distinct, the
+    # cleanest sigma semantics). NOT chamfer_nll: K4 needs no set matching.
+    latent_loss_mode: nll           # ... | nll | chamfer_nll
+    # Both AR-chain knobs stay OFF (the snap K4 recipe; the factor head below
+    # replaced the AR chain).
+    ar_latent_sampling: false
+    ar_context_sampling: false
+    # ---- Low-rank factor head (FAC) ----
+    # Single-shot structured covariance over the flattened K*D latent. rank 64
+    # was measured on K4's 2048-dim residual (63 effective dims) -- HML K4 has
+    # the same 4*512=2048 flattened dim, so the rank transfers.
+    # Watch train/factor_a_mean: must GROW from the e^-2 start (~0.14).
+    latent_low_rank: 64
+    lambda_latent_set: 1.0
+    latent_sinkhorn_epsilon: 0.05
+    latent_sinkhorn_iters: 30
+    # ---- GNU motion-understanding (M2T) branch (HML-validated values) ----
+    lambda_m2t: 1.0
+    m2t_max_new_tokens: 64
+    m2t_label_smoothing: 0.1
+    m2t_latent_noise_std: 0.05
+    m2t_loss_floor: 2.8
+    m2t_num_beams: 1
+    # ---- Variational latent head: NLL-calibrated conditional sampler ----
+    variational: true
+    # 0: the variance-only KL is the sigma=1 clamp that killed every sampling
+    # attempt -- with the NLL anchor, sigma calibration needs NO prior term.
+    lambda_kl: 0
+    kl_warmup_epochs: 0
+    kl_free_bits: 0.0
+    # Fallback only for legacy weights-only ALAE ckpts (stats otherwise read
+    # from ALAE_CKPT, embedded by alae_train.py).
+    latent_stats_path: checkpoints/alae_k${K}_latent_stats.pt
+    eval_sample_temperature: 1.0  # MM pass; 1.0 = the calibrated conditional
+    disable_perceptual: false
+    t2m_perceptual_ckpt: deps/t2m/t2m/text_mot_match/model/finest.tar
+    alae_ckpt: ${ALAE_CKPT}
+    # ALAE architecture (MUST exactly match the checkpoint that is loaded).
+    alae:
+      input_dim: 263
+      # K is taken from `k_motion_tokens` above; do not set `k` here.
+      latent_dim: 512
+      hidden_dim: 512
+      depth: 3
+      dilation_growth_rate: 3
+      activation: gelu
+      norm: null
+      num_res_blocks: 2
+      num_encoder_layers: 4
+      num_decoder_layers: 4
+      nhead: 8
+      dim_feedforward: 2048
+      dropout: 0.05
+      max_decode_len: 256
+    lm:
+      target: motGPT.archs.mgpt_lm.MLM
+      params:
+        model_type: gpt2
+        model_path: deps/gpt2
+        stage: ${TRAIN.STAGE}
+        ablation: ${ABLATION}
+        motion_codebook_size: 0
+        max_length: 256
+
+LOSS:
+  LAMBDA_CLS: 0.0
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 1.0
+  LAMBDA_KL: 0.0
+  LAMBDA_COMMIT: 0.0
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+METRIC:
+  TASK: 'gnu'
+  TYPE: ['TM2TMetrics', 'M2TMetrics']
+  # ---- BestGNUCheckpoint (joint G+U model selection -> best_gnu.ckpt) ----
+  GNU_ALPHA: 0.5      # 0.5 balanced; >0.5 favors generation, <0.5 favors understanding
+  # HML FID scale is ~0.2-0.5 (vs snap's ~20): keep the HML tau.
+  GNU_FID_TAU: 1.0
+  DIV_GT: 9.5         # HML GT Diversity anchor
+  M2T_BERT_ON_VAL: false
+  # ---- THE PROTOCOL SWITCH: sample the FID/R pass from the calibrated
+  # conditional (z = mu + sigma*eps). Every reported number (val + test) is
+  # generative; best_fid.ckpt is selected under the same protocol. 0 would
+  # fall back to the old mu-decode (regression) protocol that the incumbent
+  # HML baseline numbers used.
+  FID_SAMPLE_TEMP: 1.0
+  # Per-epoch MultiModality monitor during training validation.
+  MM_ON_VAL: true
+  MM_VAL_NUM_SAMPLES: 32
+  MM_VAL_NUM_REPEATS: 30
+
+LOGGER:
+  TYPE: ["tensorboard"]
+  VAL_EVERY_STEPS: 10
+  TENSORBOARD:
+    params:
+      save_dir: ${FOLDER_EXP}
+
+ABLATION:
+  predict_ratio: 0.2
+  inbetween_ratio: 0.25
+  use_length: False
+  PREDICT_EPSILON: True
+
+SEED_VALUE: 1234
+DEBUG: false
+FOLDER: experiments/mugen_humanml3d/

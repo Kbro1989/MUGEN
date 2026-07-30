@@ -1,0 +1,153 @@
+# Reference recipe: plain autoregressive head, no layer router.
+#
+# The language model's last-layer hidden states are projected straight into
+# the K latent slots (ALAEMotionGPT). Useful as the ablation baseline that
+# isolates what the layer router and the calibrated factor head contribute;
+# it is not the flagship configuration.
+NAME: ALAE_T2M_GPT2_K4
+ACCELERATOR: 'gpu'
+DEVICE: [1]
+NUM_NODES: 
+
+# Pre-trained ALAE checkpoint (state_dict of AdaptiveLengthAutoEncoder).
+ALAE_CKPT: checkpoints/alae_k4.pt
+
+TEST:
+  CHECKPOINTS: ${FOLDER}alae-motion-gpt/ALAE_T2M_GPT2_K4/checkpoints/best_fid.ckpt
+  SPLIT: test
+  BATCH_SIZE: 128
+  REPLICATION_TIMES: 20
+  VISUALIZE: true        # master switch for rendering
+  VIS_FULL: false        # false -> render a random subset only
+  # the remaining VIS_* keys are optional
+  VIS_NUM_SAMPLES: 20    # subset size when VIS_FULL is false
+  VIS_SEED: 1234         # sampling seed (defaults to SEED_VALUE)
+  VIS_NUM_WORKERS: 32    # render workers (defaults to min(16, cpu//2))
+
+TRAIN:
+  RESUME: ${FOLDER}alae-motion-gpt/ALAE_T2M_GPT2_K4
+  STAGE: lm_pretrain
+  instruction_type: t2m
+  BATCH_SIZE: 256
+  END_EPOCH: 200
+  # options, 32, bf16, bf16-mixed
+  precision: bf16-mixed
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 1
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: 200
+      eta_min: 1e-6
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 1e-4
+      weight_decay: 0.01
+
+EVAL:
+  SPLIT: 'val' # Validation split name
+  BATCH_SIZE: 128 # Validation Batch size
+  NUM_WORKERS: 8 # Validation Batch size
+
+DATASET:
+  target: motGPT.data.HumanML3D.HumanML3DDataModule
+  CODE_PATH: ""
+  TASK_PATH: ""
+  HUMANML3D:
+    ROOT: datasets/humanml3d/
+    SPLIT_ROOT: datasets/humanml3d/
+    FPS: 20
+    MIN_MOTION_LEN: 20
+    MAX_MOTION_LEN: 200
+
+model:
+  target: motGPT.models.alae_motion_gpt.ALAEMotionGPT
+  diff_loss: null
+  params:
+    condition: 'text'
+    task: 't2m'
+    stage: ${TRAIN.STAGE}
+    metrics_dict: ['TM2TMetrics']
+    # Override default.yaml interpolation; ALAE does not use legacy tokenizer configs.
+    motion_vae: null
+    codebook_size: 0
+    # K latent tokens (must match ALAE checkpoint).
+    k_motion_tokens: 4
+    # Speed up the K-step AR rollout with GPT2 past_key_values.
+    use_kv_cache: true
+    unfreeze_alae_decoder: false
+    freeze_text_embeddings: true
+    # Loss weights.
+    lambda_rec: 1.0
+    lambda_ric: 0.5
+    lambda_percept: 10.0
+    lambda_latent_l2: 0
+    lambda_latent_mse: 1
+    disable_perceptual: false
+    t2m_perceptual_ckpt: deps/t2m/t2m/text_mot_match/model/finest.tar
+    alae_ckpt: ${ALAE_CKPT}
+    # ALAE architecture (MUST exactly match the checkpoint that is loaded).
+    alae:
+      input_dim: 263
+      # K is taken from `k_motion_tokens` above; do not set `k` here.
+      latent_dim: 512
+      hidden_dim: 512
+      depth: 3
+      dilation_growth_rate: 3
+      activation: gelu
+      norm: null
+      num_res_blocks: 2
+      num_encoder_layers: 4
+      num_decoder_layers: 4
+      nhead: 8
+      dim_feedforward: 2048
+      dropout: 0.05
+      max_decode_len: 256
+    lm:
+      target: motGPT.archs.mgpt_lm.MLM
+      params:
+        model_type: gpt2
+        model_path: deps/gpt2
+        stage: ${TRAIN.STAGE}
+        ablation: ${ABLATION}
+        # We don't use the legacy `<motion_id_*>` tokens; setting size to 0
+        # adds only 3 unused special markers (start/end/mask). Harmless.
+        motion_codebook_size: 0
+        max_length: 256
+
+LOSS:
+  LAMBDA_CLS: 0.0
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 1.0
+  LAMBDA_KL: 0.0
+  LAMBDA_COMMIT: 0.0
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+METRIC:
+  TASK: 't2m'
+  TYPE: ['TM2TMetrics']
+  # TYPE: ['TM2TMetrics', 'MMMetrics']
+
+LOGGER:
+  TYPE: ["tensorboard", "wandb"]
+  VAL_EVERY_STEPS: 10
+  TENSORBOARD:
+    params:
+      save_dir: ${FOLDER_EXP}
+  WANDB:
+    params:
+      project: "alae_llm_t2m"
+      entity: "your_wandb_entity"
+      save_dir: ${FOLDER_EXP}
+
+ABLATION:
+  predict_ratio: 0.2
+  inbetween_ratio: 0.25
+  use_length: False
+  PREDICT_EPSILON: True
+
+SEED_VALUE: 1234
+DEBUG: false
+FOLDER: experiments/alae_t2m/

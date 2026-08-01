@@ -178,8 +178,11 @@ def main():
 	parser.add_argument('--max_len', type=int, default=None,
 		help='Maximum training clip length (frames). Defaults per dataset: humanml3d 200 '
 		     '(T2M eval upper bound), snapmogen 320 (official max_motion_length).')
-	# Phase 1 capacity defaults (was K=16, latent=128, hidden=128, layers=3, FF=512).
-	parser.add_argument('--k', type=int, default=64)
+	# Stage-1 capacity defaults.
+	parser.add_argument('--k', type=int, default=4,
+		help='Number of continuous latent slots the clip is compressed into. '
+		     'The best budget is dataset-dependent; the released HumanML3D '
+		     'model uses 2 and the SnapMoGen model uses 4.')
 	parser.add_argument('--latent_dim', type=int, default=512)
 	parser.add_argument('--hidden_dim', type=int, default=512)
 	parser.add_argument('--depth', type=int, default=3)

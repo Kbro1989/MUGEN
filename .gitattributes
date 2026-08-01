@@ -16,4 +16,5 @@
 *.tar  binary
 *.png  binary
 *.jpg  binary
+*.pdf  binary
 *.mp4  binary

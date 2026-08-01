@@ -4,12 +4,16 @@
 
 ### A Unified Framework for Efficient Motion Understanding and Generation
 
+[![arXiv](https://img.shields.io/badge/arXiv-2607.27581-b31b1b.svg)](https://arxiv.org/abs/2607.27581)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-yellow)](https://huggingface.co/zy22b/MUGEN)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
 **No codebook, one draw.**
+
+📄 [Paper (arXiv:2607.27581)](https://arxiv.org/abs/2607.27581) &nbsp;·&nbsp;
+🤗 [Pretrained model](https://huggingface.co/zy22b/MUGEN)
 
 </div>
 
@@ -65,16 +69,37 @@ pass**. No iterative refinement, no residual stages, no denoising chain.
 The pipeline is two stages: train the autoencoder (Stage 1), then train the
 language model against the frozen autoencoder (Stage 2).
 
-```
-            ┌──────────── Stage 1: ALAE ────────────┐
-motion ────►│ conv trunk ─► cross-attn ─► K latents │────► cross-attn ─► motion
-            └───────────────────────────────────────┘         (frozen in Stage 2)
-                                    ▲   │
-            ┌───────────────────────┴───┴───────────── Stage 2: LM ──────────────┐
-text ──────►│ GPT-2 + <MOT> ─► K rollout steps ─► layer router ─► calibrated head│
-            └───────────────────────────────────────────────────────────────────┘
-motion ────► K latents ─► motion projector ─► GPT-2 ─► caption      (understanding)
-```
+<div align="center">
+  <img src="figures/stage1.png" width="82%" alt="Stage 1: the adaptive-length autoencoder">
+</div>
+
+**Stage 1.** An encoder turns a clip `x` of `T` frames into per-frame features
+`m`, and a cross-attention module lets `K` learnable latent queries `q` read
+those frames into `K` latent slots `z`. A second cross-attention module runs the
+other way: a position table `p` of `T` queries reads the `K` slots back into `T`
+per-frame features, which the decoder turns into the reconstruction. Because `q`
+and `p` are what set the two ends' lengths, `T` is free on both sides, and the
+same `K` slots can be decoded at any frame count.
+
+<div align="center">
+  <img src="figures/stage2.png" width="100%" alt="Stage 2: layer-routed generation and shared-latent understanding">
+</div>
+
+**Stage 2.** One language model serves both directions, and the autoencoder is
+frozen throughout (❄), so the `K` slots are the only interface between them.
+
+*Generation* (top): the prompt ends in a `<MOT>` seed, and the model rolls out
+`K` steps, keeping every layer's hidden state, `H ∈ R^{K×L×H}`. In parallel the
+prompt's token states go through a cross-attention module into `K` routing
+contexts, and a depth router turns those into routing weights `W ∈ R^{K×L}`.
+Multiplying the two gives each slot its own mixture over transformer depth, and
+the calibrated low-rank factor head turns the result into a distribution whose
+single draw the frozen ALAE decoder realises as motion.
+
+*Understanding* (bottom): the frozen ALAE encoder produces the same kind of `K`
+slots, a projector maps them into the language model's embedding space, and the
+model captions them. The `K` latent queries are frozen and shared between the
+two directions, which is what keeps the two sides speaking about the same slots.
 
 ---
 
@@ -82,6 +107,7 @@ motion ────► K latents ─► motion projector ─► GPT-2 ─► cap
 
 | Date | Update |
 |------|--------|
+| 📄 **Jul 2026** | Paper on [arXiv](https://arxiv.org/abs/2607.27581) |
 | 🎉 **Jul 2026** | Code released, and the K=2 HumanML3D model is on [HuggingFace](https://huggingface.co/zy22b/MUGEN) |
 
 ---
@@ -225,7 +251,7 @@ python alae_train.py \
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--k` | 64 | Number of latent slots. The released model uses 2. |
+| `--k` | 4 | Number of latent slots. The released HumanML3D model uses 2, the SnapMoGen one 4. |
 | `--latent_dim` | 512 | Width of one slot. |
 | `--lambda_percept` | 10 | Weight of the perceptual loss (needs `deps/t2m/`). |
 | `--lambda_ortho` | 1 | Orthogonality regulariser on the latent queries. |
@@ -371,15 +397,17 @@ descends from.
 
 ## 🖊️ Citation
 
-The paper is under review. A citation entry will be added here once it appears;
-in the meantime please cite the repository and the model card.
+If you find our work useful for your research, please consider citing:
 
 ```bibtex
-@misc{mugen2026,
-  title  = {MUGEN: A Unified Framework for Efficient Motion Understanding and Generation},
-  note   = {Under review. Code: https://github.com/JYe16/MUGEN,
-            model: https://huggingface.co/zy22b/MUGEN},
-  year   = {2026}
+@misc{ye2026mugen,
+      title={MUGEN: A Unified Framework for Efficient Motion Understanding and Generation},
+      author={Zhankai Ye and Yukai Jin and Bingyang Wei and Bofan Li and Yusen Wu and Fangyi Li and Shangqian Gao and Xin Liu},
+      year={2026},
+      eprint={2607.27581},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2607.27581},
 }
 ```
 

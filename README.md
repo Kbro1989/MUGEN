@@ -2,7 +2,7 @@
 
 # MUGEN
 
-### A Unified Framework for Efficient Motion Understanding and Generation
+### A unified framework for efficient motion understanding and generation
 
 [![arXiv](https://img.shields.io/badge/arXiv-2607.27581-b31b1b.svg)](https://arxiv.org/abs/2607.27581)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -12,59 +12,62 @@
 
 **No codebook, one draw.**
 
-📄 [Paper (arXiv:2607.27581)](https://arxiv.org/abs/2607.27581) &nbsp;·&nbsp;
-🤗 [Pretrained model](https://huggingface.co/zy22b/MUGEN)
+[Paper (arXiv:2607.27581)](https://arxiv.org/abs/2607.27581) &nbsp;·&nbsp;
+[Pretrained model](https://huggingface.co/zy22b/MUGEN)
 
 </div>
 
 ---
 
-## 📋 Table of Contents
+## Contents
 
-- [Overview](#-overview)
-- [News](#-news)
-- [Setup](#️-setup)
-- [Quick Start](#-quick-start)
-- [Training](#-training)
-- [Evaluation](#-evaluation)
-- [Repository Layout](#-repository-layout)
-- [Citation](#️-citation)
-- [Acknowledgements](#-acknowledgements)
+- [Overview](#overview)
+- [News](#news)
+- [Setup](#setup)
+- [Quick start](#quick-start)
+- [Training](#training)
+- [Evaluation](#evaluation)
+- [Repository layout](#repository-layout)
+- [Citation](#citation)
+- [Acknowledgements](#acknowledgements)
 
 ---
 
-## 🔍 Overview
+## Overview
 
-**MUGEN** is a unified motion-language framework: one model turns a description
-into human motion and describes an observed motion in words. Both directions
-share a single motion representation, and that representation is continuous.
+MUGEN is a unified motion-language model. One model turns a description into
+human motion and describes an observed motion in words. Both directions share a
+single motion representation, and that representation is continuous.
 
-Unified motion-language systems have traditionally coupled the two directions
-through a shared discrete motion codebook, but quantization limits generation
-quality. The strongest generators buy that quality back at growing cost:
-stacked residual codebooks enlarge the representation, while masked decoding
-stages, long autoregressive rollouts and denoising chains stretch inference. And
-none of that decoding machinery serves understanding. MUGEN pays neither cost.
+Unified motion-language systems have usually coupled the two directions through
+a shared discrete motion codebook, and quantization caps generation quality. The
+strongest generators buy that quality back at a growing cost: stacked residual
+codebooks enlarge the representation, while masked decoding stages, long
+autoregressive rollouts and denoising chains stretch inference. None of that
+decoding machinery does anything for understanding. MUGEN avoids both costs.
 
-- 🎯 **Adaptive-length autoencoder (ALAE).** Cross-attention compresses a clip of
-  *any* length into **K continuous latent slots**, and a second cross-attention
-  stack expands those slots back to any requested frame count. Decoder queries
-  encode a frame's *relative phase* in the clip rather than an absolute index,
-  which is what lets one decoder serve every length. There is no codebook and no
-  quantization anywhere in the pipeline.
-- 🔀 **Depth-routed hidden states.** A text-conditioned router gives each latent
-  slot its own soft mixture over *all* transformer layers, so a slot reads from
-  the depth it needs instead of squeezing every piece of motion evidence through
-  the final layer. Both halves of the routing logit are tanh-bounded, so no
-  logit margin can saturate the softmax and kill the gradient through the
-  text-conditional structure.
-- 🎲 **Calibrated latent head.** A rank-r plus diagonal covariance over the whole
-  flattened latent set, trained by exact maximum likelihood. One draw therefore
-  carries the text-conditional variance that a description permits, *correlated
-  across slots*, which is what a single-step sampler has to supply all at once.
+The adaptive-length autoencoder (ALAE) handles length. Cross-attention
+compresses a clip of *any* length into **K continuous latent slots**, and a
+second cross-attention stack expands those slots back to any requested frame
+count. Decoder queries encode a frame's *relative phase* in the clip instead of
+an absolute index, so one decoder covers every length. Nothing in the pipeline
+is quantized, and there is no codebook.
+
+Depth-routed hidden states decide where generation reads from. A
+text-conditioned router gives each latent slot its own soft mixture over *all*
+transformer layers, so a slot reads from the depth it needs instead of squeezing
+every piece of motion evidence through the final layer. Both halves of the
+routing logit are tanh-bounded, which keeps a large logit margin from saturating
+the softmax and killing the gradient through the text-conditional structure.
+
+The calibrated latent head supplies the variance. It puts a rank-r plus diagonal
+covariance over the whole flattened latent set and is trained by exact maximum
+likelihood, so one draw carries the text-conditional variance that a description
+permits, *correlated across slots*. A single-step sampler has to supply that
+correlation all at once, since it has no later steps in which to fix things up.
 
 Generating a motion costs **K language-model steps, one draw, and one decoder
-pass**. No iterative refinement, no residual stages, no denoising chain.
+pass**, with no refinement iterations or denoising steps after it.
 
 The pipeline is two stages: train the autoencoder (Stage 1), then train the
 language model against the frozen autoencoder (Stage 2).
@@ -78,8 +81,8 @@ language model against the frozen autoencoder (Stage 2).
 those frames into `K` latent slots `z`. A second cross-attention module runs the
 other way: a position table `p` of `T` queries reads the `K` slots back into `T`
 per-frame features, which the decoder turns into the reconstruction. Because `q`
-and `p` are what set the two ends' lengths, `T` is free on both sides, and the
-same `K` slots can be decoded at any frame count.
+and `p` set the lengths at the two ends, `T` is free on both sides, and one set
+of `K` slots can be decoded at any frame count.
 
 <div align="center">
   <img src="figures/stage2.png" width="100%" alt="Stage 2: layer-routed generation and shared-latent understanding">
@@ -92,27 +95,27 @@ frozen throughout (❄), so the `K` slots are the only interface between them.
 `K` steps, keeping every layer's hidden state, `H ∈ R^{K×L×H}`. In parallel the
 prompt's token states go through a cross-attention module into `K` routing
 contexts, and a depth router turns those into routing weights `W ∈ R^{K×L}`.
-Multiplying the two gives each slot its own mixture over transformer depth, and
-the calibrated low-rank factor head turns the result into a distribution whose
-single draw the frozen ALAE decoder realises as motion.
+Multiplying the two gives each slot its own mixture over transformer depth. The
+calibrated low-rank factor head turns the result into a distribution, and a
+single draw from it goes through the frozen ALAE decoder to become motion.
 
 *Understanding* (bottom): the frozen ALAE encoder produces the same kind of `K`
 slots, a projector maps them into the language model's embedding space, and the
-model captions them. The `K` latent queries are frozen and shared between the
-two directions, which is what keeps the two sides speaking about the same slots.
+model captions them. The `K` latent queries are frozen and shared across both
+directions, so the two sides are talking about the same slots.
 
 ---
 
-## 📰 News
+## News
 
 | Date | Update |
 |------|--------|
-| 📄 **Jul 2026** | Paper on [arXiv](https://arxiv.org/abs/2607.27581) |
-| 🎉 **Jul 2026** | Code released, and the K=2 HumanML3D model is on [HuggingFace](https://huggingface.co/zy22b/MUGEN) |
+| **Jul 2026** | Paper on [arXiv](https://arxiv.org/abs/2607.27581) |
+| **Jul 2026** | Code released, and the K=2 HumanML3D model is on [HuggingFace](https://huggingface.co/zy22b/MUGEN) |
 
 ---
 
-## 🛠️ Setup
+## Setup
 
 ### Requirements
 
@@ -143,7 +146,7 @@ bash prepare/prepare_gpt2.sh
 > `--extra-index-url` line and install the stable PyTorch build for your CUDA
 > version instead.
 
-### Dataset Preparation
+### Dataset preparation
 
 1. **HumanML3D.** Follow [HumanML3D](https://github.com/EricGuo5513/HumanML3D)
    to download and preprocess the dataset, then place it under
@@ -151,12 +154,12 @@ bash prepare/prepare_gpt2.sh
 2. **SnapMoGen** (optional, for the second benchmark, roughly 16.5 GB). Run
    `python download_snap_dataset.py --save_dir datasets/`, which writes
    `datasets/SnapMoGen/`.
-3. **Evaluation encoders.** Run `bash prepare/download_evaluators.sh`. These are
-   only needed for metrics and for the Stage-1 perceptual loss; generation and
+3. **Evaluation encoders.** Run `bash prepare/download_evaluators.sh`. You only
+   need these for metrics and for the Stage-1 perceptual loss; generation and
    captioning do not use them.
 
 <details>
-<summary>📁 Expected directory structure</summary>
+<summary>Expected directory structure</summary>
 
 ```
 MUGEN/
@@ -186,11 +189,11 @@ override `DATASET.HUMANML3D.ROOT` and the `deps/` paths in
 
 ---
 
-## 🚀 Quick Start
+## Quick start
 
-The fastest path needs no dataset and no local checkpoint. The published model
-carries its own tokenizer and its own HumanML3D feature statistics, so it can
-hand back motion in real units on its own.
+This path needs no dataset and no local checkpoint. The published model carries
+its own tokenizer and its own HumanML3D feature statistics, so it can hand back
+motion in real units on its own.
 
 ```bash
 python demo_hf.py --text "a person walks forward and then waves with the right hand." --length 120
@@ -226,11 +229,11 @@ See the [model card](https://huggingface.co/zy22b/MUGEN) for the full inference
 tutorial, including batching, temperature, and reproducible draws.
 
 To score the released model on the HumanML3D test set with the project's own
-evaluation harness, see [Evaluation](#-evaluation).
+evaluation harness, see [Evaluation](#evaluation).
 
 ---
 
-## 🎓 Training
+## Training
 
 ### Stage 1: the adaptive-length autoencoder
 
@@ -255,13 +258,13 @@ python alae_train.py \
 | `--latent_dim` | 512 | Width of one slot. |
 | `--lambda_percept` | 10 | Weight of the perceptual loss (needs `deps/t2m/`). |
 | `--lambda_ortho` | 1 | Orthogonality regulariser on the latent queries. |
-| `--lambda_latent_decorr` | 0 | Latent decorrelation. **Set this.** See below. |
+| `--lambda_latent_decorr` | 0 | Latent decorrelation. Set this; see the note below. |
 | `--percept_cosine` | off | Add a directional term to the perceptual loss. |
 | `--disable_perceptual` | off | Skip the perceptual encoders entirely (ablation). |
 | `--eval_t2m_every` | 5 | Run the reconstruction FID evaluation every N epochs. |
 
-> **⚠️ Set `--lambda_latent_decorr`.** Without it, several latent slots converge
-> to *identical* targets (centered cosine similarity 1.000 between slots). Stage 2
+> **Set `--lambda_latent_decorr`.** Without it, several latent slots converge to
+> *identical* targets (centered cosine similarity 1.000 between slots). Stage 2
 > then has no opportunity for slot-wise routing to specialise, because the slots
 > it is asked to distinguish are copies of one another. The released Stage-1
 > model was trained with `0.25`; its checkpoint reports a maximum absolute
@@ -301,7 +304,7 @@ python llm_train_alae.py --cfg configs/r6p/alae_k4.yaml
 | `configs/r6p/alae_k4.yaml` | HumanML3D | 4 | Plain autoregressive projection |
 
 <details>
-<summary>⚙️ Key Stage-2 settings, and why they are what they are</summary>
+<summary>Key Stage-2 settings and the reasoning behind them</summary>
 
 | Key | Value | Notes |
 |---|---|---|
@@ -324,16 +327,16 @@ python llm_train_alae.py --cfg configs/r6p/alae_k4.yaml
 
 </details>
 
-Long runs belong in a batch job rather than an interactive session; the Stage-2
-HumanML3D recipe takes roughly six hours for 500 epochs on one modern
+Run long jobs through a batch scheduler rather than an interactive session. The
+Stage-2 HumanML3D recipe takes roughly six hours for 500 epochs on one modern
 data-center GPU.
 
 ---
 
-## 📊 Evaluation
+## Evaluation
 
 ```bash
-# HumanML3D test set, 20 replications, honest sampled protocol
+# HumanML3D test set, 20 replications, sampled protocol
 python local_eval.py --cfg configs/server/alae_k2_nll_whs_r2_eval.yaml
 
 # SnapMoGen test set
@@ -344,21 +347,21 @@ Point `TEST.CHECKPOINTS` at the Stage-2 checkpoint you want to score. Reported
 metrics are FID, R-precision, Diversity and MultiModality for generation, and
 BLEU, ROUGE-L, CIDEr, BERTScore and R-precision for captioning.
 
-**Read the protocol before comparing numbers.**
+Read the protocol before you compare these numbers against anything else.
 
-- **Sampled, not mean-decoded.** With `METRIC.FID_SAMPLE_TEMP: 1.0` every
-  reported number comes from a single draw of the calibrated conditional
-  distribution. Setting it to `0` decodes the distribution mean instead, which is
-  a regression protocol and is not comparable to a generative one.
-- **Captioning scores only compare within a dataset.** BLEU and CIDEr respond
-  very differently to reference count and caption length, and the two benchmarks
-  differ on both. Reading them across datasets can invert the conclusion.
-- **MultiModality needs a non-zero temperature.** At temperature 0 the pipeline
-  is deterministic and MultiModality collapses to 0 by construction.
-- **Checkpoint selection is part of the protocol.** `best_fid.ckpt` and
+- With `METRIC.FID_SAMPLE_TEMP: 1.0` every reported number comes from a single
+  draw of the calibrated conditional distribution. Setting it to `0` decodes the
+  distribution mean instead, which is a regression protocol and is not
+  comparable to a generative one.
+- Captioning scores only compare within a dataset. BLEU and CIDEr respond very
+  differently to reference count and caption length, and the two benchmarks
+  differ on both, so reading them across datasets can invert the conclusion.
+- MultiModality needs a non-zero temperature. At temperature 0 the pipeline is
+  deterministic and MultiModality collapses to 0 by construction.
+- Checkpoint selection is part of the protocol. `best_fid.ckpt` and
   `best_gnu.ckpt` select on generation alone and on generation plus
-  understanding respectively, and the gap between two such snapshots from one run
-  can be the same size as the effect you are trying to measure. State which one
+  understanding respectively, and the gap between two such snapshots from one
+  run can be as large as the effect you are trying to measure. State which one
   you used.
 
 `scripts/visualize_alae_recon.py` renders Stage-1 reconstructions, and
@@ -367,7 +370,7 @@ reports which transformer layer each latent slot ends up reading from.
 
 ---
 
-## 📁 Repository Layout
+## Repository layout
 
 ```
 alae_train.py                                  Stage 1 training
@@ -395,9 +398,9 @@ descends from.
 
 ---
 
-## 🖊️ Citation
+## Citation
 
-If you find our work useful for your research, please consider citing:
+If this work is useful for your research, please cite:
 
 ```bibtex
 @misc{ye2026mugen,
@@ -413,7 +416,7 @@ If you find our work useful for your research, please consider citing:
 
 ---
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 This project builds on the work of:
 
@@ -425,8 +428,4 @@ This project builds on the work of:
 
 ---
 
-<div align="center">
-
-**⭐ Star this repo if you find it helpful!**
-
-</div>
+Issues and pull requests are welcome.
